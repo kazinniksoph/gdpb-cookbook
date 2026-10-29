@@ -9,13 +9,13 @@ The goal is to make the methodology reusable across products, populations, and s
 ## Installation
 
 ```bash
-pip install git+https://github.com/kazinniksoph/gdpb
+pip install git+https://github.com/kazinniksoph/gdpb-cookbook
 ```
 
 For development:
 
 ```bash
-git clone https://github.com/kazinniksoph/gdpb
+git clone https://github.com/kazinniksoph/gdpb-cookbook
 cd gdpb-cookbook
 pip install -e ".[dev]"
 pytest
