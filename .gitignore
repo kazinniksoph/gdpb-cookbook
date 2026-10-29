@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.DS_Store
+# never commit respondent-level data
+data/
+*.xlsx
+examples/**/raw_responses.csv
+examples/**/clean.csv
+examples/**/deposit/

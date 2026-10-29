@@ -1,0 +1,14 @@
+# Example pipeline config. Run from this folder after `gdpb simulate .`
+responses: raw_responses.csv
+items: items.csv
+cleaning:
+  min_duration_seconds: 45
+  require_attention: true
+estimation:
+  link: logit
+  n_boot: 500
+  seed: 0
+aggregation:
+  population: 260000000      # US adults, replace with your target population
+  # adoption: adoption.csv   # optional: item,p_use from an external representative source
+output: deposit
