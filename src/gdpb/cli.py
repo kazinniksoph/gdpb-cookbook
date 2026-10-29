@@ -4,9 +4,14 @@
     gdpb validate  RESPONSES.csv [--items ITEMS.csv]
     gdpb design    ITEMS.csv --n-respondents N [--items-per-respondent K] -o allocation.csv
     gdpb clean     RESPONSES.csv -o clean.csv [--min-duration 45] [--no-attention]
-    gdpb estimate  CLEAN.csv -o items.csv [--link logit|probit] [--n-boot 500]
-    gdpb aggregate ITEMS.csv --population N [--adoption adoption.csv] -o aggregate.csv
-    gdpb run       config.yaml        # clean -> estimate -> aggregate -> deposit
+    gdpb estimate  CLEAN.csv -o items.csv [--link logit|probit] [--n-boot 500] [--cap 500]
+    gdpb aggregate ITEMS.csv --population N [--adoption-rate R | --adoption adoption.csv]
+    gdpb run       config.yaml|config.json     # clean -> estimate -> aggregate -> deposit
+
+The config for `run` accepts the Cookbook's flat keys (Section 8.2):
+    responses, items, item_id (optional filter), population, adoption_rate,
+    adoption_source, reporting_cap, annualization_factor, seed, output
+plus optional nested blocks `cleaning: {...}` and `estimation: {link, n_boot}`.
 """
 
 import argparse
@@ -18,7 +23,7 @@ import pandas as pd
 import yaml
 
 from . import __version__
-from .aggregate import aggregate_table, sum_surplus
+from .aggregate import aggregate_table, sum_values
 from .clean import clean_responses
 from .design import allocate
 from .estimate import estimate_all_items
@@ -29,7 +34,27 @@ from .simulate import simulate_survey
 
 def _read(path):
     p = Path(path)
-    return pd.read_excel(p) if p.suffix.lower() in (".xlsx", ".xls") else pd.read_csv(p)
+    if p.suffix.lower() in (".xlsx", ".xls"):
+        return pd.read_excel(p)
+    return pd.read_csv(p)
+
+
+def _read_config(path):
+    p = Path(path)
+    text = p.read_text()
+    return json.loads(text) if p.suffix.lower() == ".json" else yaml.safe_load(text)
+
+
+def _adoption_arg(value, base=Path(".")):
+    """A number, or a path to a CSV with item_id and adoption_rate."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        ad = _read(base / str(value))
+        col = "adoption_rate" if "adoption_rate" in ad.columns else "p_use"
+        return dict(zip(ad["item_id"].astype(str), ad[col].astype(float)))
 
 
 def cmd_simulate(a):
@@ -39,16 +64,17 @@ def cmd_simulate(a):
     df.to_csv(out / "raw_responses.csv", index=False)
     items.to_csv(out / "items.csv", index=False)
     (out / "ground_truth.json").write_text(json.dumps(truth, indent=2))
-    print(f"wrote {len(df):,} rows, {len(items)} items -> {out}")
+    print(f"wrote {len(df):,} rows, {len(items)} items -> {out} (synthetic)")
 
 
 def cmd_validate(a):
     d = validate_responses(_read(a.responses))
-    msg = f"responses ok: {len(d):,} rows, {d['item'].nunique()} items, " \
-          f"{d['respondent_id'].nunique():,} respondents"
+    msg = (f"responses ok: {len(d):,} rows, {d['item_id'].nunique()} items, "
+           f"{d['respondent_id'].nunique():,} respondents, "
+           f"{int(d['is_user'].sum()):,} user rows")
     if a.items:
         items = validate_items(_read(a.items))
-        unknown = sorted(set(d["item"]) - set(items["item"]))
+        unknown = sorted(set(d["item_id"]) - set(items["item_id"]))
         if unknown:
             print(f"WARNING: {len(unknown)} items in responses not in item file: {unknown[:10]}")
         msg += f"; item file ok: {len(items)} items"
@@ -59,7 +85,7 @@ def cmd_design(a):
     items = validate_items(_read(a.items))
     alloc = allocate(items, a.n_respondents, a.items_per_respondent, seed=a.seed)
     alloc.to_csv(a.output, index=False)
-    cells = alloc.groupby(["item", "price"]).size()
+    cells = alloc.groupby(["item_id", "offer"]).size()
     print(f"wrote {len(alloc):,} assignments -> {a.output}; "
           f"cell sizes min {cells.min()} / max {cells.max()}")
 
@@ -70,50 +96,65 @@ def cmd_clean(a):
                                    require_attention=not a.no_attention)
     clean.to_csv(a.output, index=False)
     Path(a.output).with_suffix(".audit.json").write_text(json.dumps(audit, indent=2))
-    print(json.dumps(audit, indent=2))
+    print(json.dumps({k: v for k, v in audit.items() if k != "rules"}, indent=2))
+    print(json.dumps({k: (v if v == "skipped" else v["removed"])
+                      for k, v in audit["rules"].items()}, indent=2))
 
 
 def cmd_estimate(a):
     d = validate_responses(_read(a.clean))
-    table, _ = estimate_all_items(d, link=a.link, n_boot=a.n_boot, seed=a.seed)
+    table, _, acc = estimate_all_items(d, reporting_cap=a.cap, link=a.link,
+                                       n_boot=a.n_boot, seed=a.seed)
     table.to_csv(a.output, index=False)
-    cols = ["item", "n_users", "p_use", "median_wta", "median_lo", "median_hi", "mean_wta"]
-    with pd.option_context("display.width", 160, "display.float_format", "{:,.2f}".format):
+    acc.to_csv(Path(a.output).with_name(Path(a.output).stem + "_acceptance_by_offer.csv"),
+               index=False)
+    cols = ["item_id", "n_users", "sample_usage_rate", "median_wta", "median_lo", "median_hi",
+            "median_location", "reporting_cap", "capped_mean_wta"]
+    with pd.option_context("display.width", 200, "display.float_format", "{:,.2f}".format):
         print(table[cols].to_string(index=False))
 
 
 def cmd_aggregate(a):
     table = _read(a.items)
-    ext = None
-    if a.adoption:
-        ad = _read(a.adoption)
-        ext = dict(zip(ad["item"].astype(str), ad["p_use"].astype(float)))
-    agg = aggregate_table(table, population=a.population, p_use_external=ext)
+    adoption = _adoption_arg(a.adoption_rate if a.adoption_rate is not None else a.adoption)
+    agg = aggregate_table(table, population=a.population, adoption=adoption,
+                          adoption_source=a.adoption_source,
+                          annualization_factor=a.annualization_factor)
     agg.to_csv(a.output, index=False)
-    print(json.dumps(sum_surplus(agg), indent=2))
+    print(json.dumps(sum_values(agg), indent=2))
 
 
 def cmd_run(a):
-    cfg = yaml.safe_load(Path(a.config).read_text())
+    cfg = _read_config(a.config)
     base = Path(a.config).parent
+    est = cfg.get("estimation", {})
+    cl = cfg.get("cleaning", {})
+
     resp = validate_responses(_read(base / cfg["responses"]))
     items_df = validate_items(_read(base / cfg["items"])) if cfg.get("items") else None
-    cl = cfg.get("cleaning", {})
+    if cfg.get("item_id"):
+        resp = resp[resp["item_id"] == str(cfg["item_id"])]
+        if items_df is not None:
+            items_df = items_df[items_df["item_id"] == str(cfg["item_id"])]
+
     clean, audit = clean_responses(resp, min_duration_seconds=cl.get("min_duration_seconds", 45),
                                    require_attention=cl.get("require_attention", True))
-    est = cfg.get("estimation", {})
-    table, _ = estimate_all_items(clean, link=est.get("link", "logit"),
-                                  n_boot=est.get("n_boot", 500), seed=est.get("seed", 0))
+    table, _, acc = estimate_all_items(
+        clean, reporting_cap=cfg.get("reporting_cap", est.get("reporting_cap")),
+        link=est.get("link", "logit"), n_boot=est.get("n_boot", 500),
+        seed=cfg.get("seed", est.get("seed", 0)))
+
     agg_table = totals = None
-    ag = cfg.get("aggregation")
-    if ag and ag.get("population"):
-        ext = None
-        if ag.get("adoption"):
-            ad = _read(base / ag["adoption"])
-            ext = dict(zip(ad["item"].astype(str), ad["p_use"].astype(float)))
-        agg_table = aggregate_table(table, population=float(ag["population"]), p_use_external=ext)
-        totals = sum_surplus(agg_table, items_df)
-    out = write_deposit(base / cfg.get("output", "deposit"), table, audit, cfg, agg_table, totals)
+    if cfg.get("population"):
+        adoption = _adoption_arg(cfg.get("adoption_rate"), base)
+        agg_table = aggregate_table(
+            table, population=float(cfg["population"]), adoption=adoption,
+            adoption_source=cfg.get("adoption_source", "survey usage question"),
+            annualization_factor=float(cfg.get("annualization_factor", 12)))
+        totals = sum_values(agg_table, items_df)
+
+    out = write_deposit(base / cfg.get("output", "deposit"), table, audit, cfg, acc,
+                        agg_table, totals)
     print(f"deposit written -> {out}")
     print((out / "summary.md").read_text())
 
@@ -135,7 +176,7 @@ def build_parser():
     s.add_argument("--items")
     s.set_defaults(fn=cmd_validate)
 
-    s = sub.add_parser("design", help="allocate respondents to (item, price) cells")
+    s = sub.add_parser("design", help="allocate respondents to (item, offer) cells")
     s.add_argument("items")
     s.add_argument("--n-respondents", type=int, required=True)
     s.add_argument("--items-per-respondent", type=int, default=1)
@@ -156,16 +197,22 @@ def build_parser():
     s.add_argument("--link", choices=["logit", "probit"], default="logit")
     s.add_argument("--n-boot", type=int, default=500)
     s.add_argument("--seed", type=int, default=0)
+    s.add_argument("--cap", type=float, default=None,
+                   help="reporting cap for the mean (default: top of each item's grid)")
     s.set_defaults(fn=cmd_estimate)
 
-    s = sub.add_parser("aggregate", help="consumer surplus from an item table")
+    s = sub.add_parser("aggregate", help="annualized capped value from an item table")
     s.add_argument("items")
     s.add_argument("--population", type=float, required=True)
-    s.add_argument("--adoption", help="CSV with columns item, p_use (external adoption)")
+    s.add_argument("--adoption-rate", type=float, default=None,
+                   help="single adoption share applied to every item")
+    s.add_argument("--adoption", help="CSV with item_id, adoption_rate (external source)")
+    s.add_argument("--adoption-source", default="external")
+    s.add_argument("--annualization-factor", type=float, default=12)
     s.add_argument("-o", "--output", default="aggregate.csv")
     s.set_defaults(fn=cmd_aggregate)
 
-    s = sub.add_parser("run", help="full pipeline from a config.yaml")
+    s = sub.add_parser("run", help="full pipeline from a config file (yaml or json)")
     s.add_argument("config")
     s.set_defaults(fn=cmd_run)
     return p

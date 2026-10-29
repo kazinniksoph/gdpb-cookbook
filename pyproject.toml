@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gdpb"
-version = "0.1.0"
+version = "0.2.0"
 description = "Field, clean, estimate and aggregate GDP-B style willingness-to-accept choice experiments."
 readme = "README.md"
 license = { text = "MIT" }

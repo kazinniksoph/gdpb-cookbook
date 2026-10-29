@@ -14,3 +14,7 @@ data/
 examples/**/raw_responses.csv
 examples/**/clean.csv
 examples/**/deposit/
+examples/example/
+examples/raw_responses.csv
+examples/items.csv
+examples/ground_truth.json

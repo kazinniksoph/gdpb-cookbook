@@ -1,8 +1,9 @@
-"""Survey design: price grids, recentring, allocation, sample size.
+"""Survey design: offer grids, recentering, allocation, sample size.
 
-The fielded protocol uses one randomized price per respondent per item,
-drawn from a log-spaced grid. The grid should bracket the median WTA:
-acceptance near the bottom of the grid should be low, near the top high.
+Follows Section 3 of the GDP-B Cookbook. One randomized offer per
+respondent per item, drawn from a grid that should bracket the median and
+reach high enough to estimate the capped mean. The spacing rule here is a
+convenience, not a requirement: payments need not follow exact log spacing.
 """
 
 import numpy as np
@@ -10,58 +11,67 @@ import pandas as pd
 
 
 def log_grid(center: float, n: int = 7, span: float = 2.5, round_to: int = 0) -> list[float]:
-    """Log-spaced grid of n prices centred on `center`.
+    """Log-spaced grid of n offers centred on `center`.
 
-    `span` is the half-width in log units: the extreme prices are
-    center * exp(+-span). With span=2.5 the grid covers a factor of ~150
-    in each direction, wide enough for first-wave uncertainty.
+    `span` is the half-width in log units; the extreme offers are
+    center * exp(+-span). With span=2.5 the grid covers a factor of about
+    150 either side, wide enough for first-wave uncertainty.
     """
     if center <= 0:
         raise ValueError("center must be positive")
     g = np.exp(np.log(center) + np.linspace(-span, span, n))
-    g = np.round(g, round_to)
-    g = np.unique(g.clip(min=1.0))
+    g = np.unique(np.round(g, round_to).clip(min=1.0))
     return [float(x) for x in g]
 
 
-def recenter_grid(fit_row, n: int = 7, span: float = 1.5) -> list[float]:
+def recenter_grid(fit_row, n: int = 7, span: float = 1.5, keep: list[float] | None = None) -> list[float]:
     """Second-wave grid from a first-wave fit (a row of the item table).
 
-    Rules, in order:
-    - right-censored (median above the grid): centre on 3x the old grid max
-    - left-censored (median below the grid): centre on the old grid min / 3
+    - median above the grid: centre on 3x the old maximum
+    - median below the grid: centre on the old minimum / 3
     - otherwise centre on the estimated median with a narrower span
+    `keep` lists offers to retain for comparability across waves.
     """
+    loc = fit_row.get("median_location", "within_grid")
     med = fit_row.get("median_wta", np.nan)
-    if bool(fit_row.get("right_censored", False)) or not np.isfinite(med):
-        return log_grid(3.0 * float(fit_row["grid_max"]), n=n, span=span)
-    if bool(fit_row.get("left_censored", False)):
-        return log_grid(max(1.0, float(fit_row["grid_min"]) / 3.0), n=n, span=span)
-    return log_grid(float(med), n=n, span=span)
+    if loc == "above_grid" or not np.isfinite(med):
+        g = log_grid(3.0 * float(fit_row["grid_max"]), n=n, span=span)
+    elif loc == "below_grid":
+        g = log_grid(max(1.0, float(fit_row["grid_min"]) / 3.0), n=n, span=span)
+    else:
+        g = log_grid(float(med), n=n, span=span)
+    if keep:
+        g = sorted(set(g) | {float(k) for k in keep})
+    return g
 
 
-def required_sample(n_prices: int, per_price: int = 200, p_use: float = 1.0,
+def required_sample(n_offers: int, per_offer: int = 200, p_use: float = 1.0,
                     attrition: float = 0.10) -> int:
-    """Respondents to recruit per item so that each price point has
-    `per_price` usable *user* responses after nonusers and cleaning losses."""
+    """Respondents to recruit per item so each offer has about `per_offer`
+    usable user responses after nonusers and cleaning losses.
+
+    `per_offer` is a planning input, not a universal rule: the precision you
+    need, the number of items, and whether information is pooled across
+    items all change it (Cookbook 3.3).
+    """
     if not 0 < p_use <= 1:
         raise ValueError("p_use must be in (0, 1]")
-    return int(np.ceil(n_prices * per_price / (p_use * (1.0 - attrition))))
+    return int(np.ceil(n_offers * per_offer / (p_use * (1.0 - attrition))))
 
 
 def allocate(items: pd.DataFrame, n_respondents: int, items_per_respondent: int = 1,
              seed: int = 0) -> pd.DataFrame:
-    """Assign each respondent `items_per_respondent` items and one price per item.
+    """Assign each respondent `items_per_respondent` items and one offer per item.
 
-    Prices are balanced within item (round-robin over a shuffled grid) so
-    that cells fill evenly rather than by chance. Returns a long table with
-    columns respondent_id, item, price, position.
+    Offers are balanced within item (round-robin over a shuffled grid) so
+    cells fill evenly. Returns respondent_id, item_id, offer, position.
+    The usage question must still be asked before the offer is shown.
     """
     from .schema import parse_grid
 
     rng = np.random.default_rng(seed)
-    keys = items["item"].tolist()
-    grids = {r["item"]: parse_grid(r["grid"]) for _, r in items.iterrows()}
+    keys = items["item_id"].tolist()
+    grids = {r["item_id"]: parse_grid(r["price_grid"]) for _, r in items.iterrows()}
     if items_per_respondent > len(keys):
         raise ValueError("items_per_respondent exceeds number of items")
 
@@ -76,6 +86,6 @@ def allocate(items: pd.DataFrame, n_respondents: int, items_per_respondent: int 
             counters[k] += 1
             if counters[k] % len(g) == 0:
                 orders[k] = rng.permutation(len(g))
-            rows.append({"respondent_id": f"R{i + 1:06d}", "item": k,
-                         "price": float(g[idx]), "position": pos})
+            rows.append({"respondent_id": f"R{i + 1:06d}", "item_id": k,
+                         "offer": float(g[idx]), "position": pos})
     return pd.DataFrame(rows)

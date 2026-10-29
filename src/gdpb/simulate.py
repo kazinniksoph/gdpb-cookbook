@@ -1,11 +1,12 @@
 """Synthetic SBDC survey with a known ground truth.
 
 Used for tests, examples and dry runs of a design before fielding.
-Mirrors the fielded studies: one (item, price) question per row, a
-log-spaced item-specific grid, three-way response, log-normal WTA
-heterogeneity within item, item-specific usage rates, and a small share
-of inattentive respondents, speeders and duplicate submissions so that
-the cleaning stage has something to remove.
+Mirrors the fielded protocol: usage screened before any offer, one
+randomized offer per user per item, nonusers receive no valuation
+question (response = not_asked), log-normal WTA heterogeneity within item,
+item-specific adoption, and a small share of inattentive respondents,
+speeders and duplicate submissions so the cleaning stage has work to do.
+All observations are synthetic.
 """
 
 import numpy as np
@@ -14,7 +15,7 @@ import pandas as pd
 from .design import log_grid
 
 DEFAULT_ITEMS = {
-    # item: median monthly WTA (USD), log-sd, usage share
+    # item_id: median monthly WTA (USD), log-sd, adoption share
     "electricity":     {"median_wta": 8000, "sigma": 1.6, "p_use": 0.99},
     "search_engines":  {"median_wta": 1200, "sigma": 1.5, "p_use": 0.97},
     "email":           {"median_wta": 500,  "sigma": 1.4, "p_use": 0.95},
@@ -31,7 +32,7 @@ DEFAULT_ITEMS = {
 def simulate_survey(items: dict | None = None, n_per_item: int = 2100, seed: int = 20260805,
                     share_inattentive: float = 0.03, share_speeders: float = 0.02,
                     share_duplicates: float = 0.005, grid_span: float = 2.5,
-                    grid_n: int = 7) -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+                    grid_n: int = 7, currency: str = "USD"):
     """Return (raw_responses, ground_truth, item_file)."""
     items = items or DEFAULT_ITEMS
     rng = np.random.default_rng(seed)
@@ -40,32 +41,38 @@ def simulate_survey(items: dict | None = None, n_per_item: int = 2100, seed: int
 
     rows, truth, item_rows = [], {}, []
     rid = 0
-    for item, t in items.items():
+    for item_id, t in items.items():
         grid = log_grid(t["median_wta"], n=grid_n, span=grid_span)
-        truth[item] = {**t, "grid": grid}
-        item_rows.append({"item": item, "label": item.replace("_", " "),
-                          "category": "demo", "scope": "category",
-                          "grid": "|".join(f"{p:g}" for p in grid)})
+        truth[item_id] = {**t, "price_grid": grid}
+        item_rows.append({"item_id": item_id, "label": item_id.replace("_", " "),
+                          "scope": "category", "currency": currency, "duration_months": 1,
+                          "price_grid": "|".join(f"{p:g}" for p in grid)})
         mu = np.log(t["median_wta"])
         for _ in range(n_per_item):
             rid += 1
-            price = float(rng.choice(grid))
-            uses = rng.random() < t["p_use"]
             income = rng.choice(incomes, p=[0.6, 0.4])
             shift = 0.35 if income == "over_75k" else 0.0
             wta = np.exp(rng.normal(mu + shift, t["sigma"]))
             inattentive = rng.random() < share_inattentive
             speeder = rng.random() < share_speeders
             duration = max(20.0, rng.normal(195, 60)) if not speeder else rng.uniform(5, 25)
+            is_user = int(rng.random() < t["p_use"])
             if inattentive:
-                response = rng.choice(["yes", "no", "dont_use"], p=[.45, .35, .2])
+                is_user = int(rng.random() < 0.8)
                 fake = rng.random() < 0.5
             else:
-                response = "dont_use" if not uses else ("yes" if price >= wta else "no")
                 fake = False
+            if is_user:
+                offer = float(rng.choice(grid))
+                if inattentive:
+                    response = rng.choice(["yes", "no"])
+                else:
+                    response = "yes" if offer >= wta else "no"
+            else:
+                offer, response = np.nan, "not_asked"
             rows.append({
-                "respondent_id": f"R{rid:06d}", "item": item, "price": price,
-                "response": response,
+                "respondent_id": f"R{rid:06d}", "item_id": item_id, "is_user": is_user,
+                "offer": offer, "response": response, "weight": 1.0,
                 "age_group": rng.choice(ages, p=[.35, .4, .25]), "income_group": income,
                 "duration_seconds": round(float(duration), 1),
                 "selected_fake_item": bool(fake),
