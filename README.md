@@ -16,7 +16,7 @@ For development:
 
 ```bash
 git clone https://github.com/kazinniksoph/gdpb
-cd gdpb
+cd gdpb-cookbook
 pip install -e ".[dev]"
 pytest
 ```
