@@ -133,7 +133,7 @@ For each product, the package estimates WTA among respondents who use it.
 
 4. **Nonparametric checks.** Estimate an isotonic acceptance curve, which enforces monotonicity, and identify its 50% crossing. The package also produces a Kaplan–Meier-style WTA survival curve.
 
-5. **Identification and grid diagnostics.** Flag estimates whose medians fall outside the offered price range, including cases where acceptance at the lowest price is already above 50% or acceptance at the highest price remains below 50%. These diagnostics help determine whether subsequent survey waves need different price grids.
+5. **Identification and grid diagnostics.** Flag estimates whose medians fall outside the offered price range (left- or right-censored). Separately, warn when acceptance at the lowest price exceeds 35% or acceptance at the highest price falls below 65%, which signals that the grid is drifting even when the median is still inside it. Both thresholds are adjustable. These diagnostics help determine whether subsequent survey waves need different price grids.
 
 ### Aggregating consumer surplus
 
