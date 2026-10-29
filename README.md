@@ -1,130 +1,227 @@
 # gdpb
 
-A reusable toolkit for running GDP-B style willingness-to-accept (WTA) surveys:
-design the price grids, clean the responses, estimate per-item WTA, aggregate to
-consumer surplus, and write a deposit that other teams can compare against.
+`gdpb` is an open-source Python package for conducting GDP-B willingness-to-accept (WTA) surveys. It provides a reproducible workflow for **designing surveys, cleaning responses, estimating product-level WTA, calculating consumer surplus, and producing standardized research outputs**.
 
-The method is from Brynjolfsson, Collis, Diewert, Eggers and Fox,
-"GDP-B: Accounting for the Value of New and Free Goods" (*AEJ: Macro*, 2025).
-The code distils the pipelines used for the Stanford Digital Economy Lab's
-GDP-B Waves 1 and 2 and the "What is Generative AI Worth?" survey.
+The methodology follows Brynjolfsson, Collis, Diewert, Eggers, and Fox, "GDP-B: Accounting for the Value of New and Free Goods" (*American Economic Journal: Macroeconomics*, 2025). The package builds on the survey and estimation pipelines developed at Stanford's Digital Economy Lab for GDP-B Waves 1 and 2 and the *What Is Generative AI Worth?* study.
 
-## Install
+The goal is to make the methodology reusable across products, populations, and survey waves without rewriting the estimation code.
+
+## Installation
 
 ```bash
 pip install git+https://github.com/kazinniksoph/gdpb
-# or, for development
-git clone https://github.com/kazinniksoph/gdpb && cd gdpb && pip install -e ".[dev]" && pytest
 ```
 
-Python 3.10 or later. Depends on numpy, pandas, statsmodels, scikit-learn, pyyaml.
-
-## Five-minute tour
+For development:
 
 ```bash
-gdpb simulate demo --n-per-item 2100      # synthetic survey with known ground truth
-gdpb clean demo/raw_responses.csv -o demo/clean.csv
-gdpb estimate demo/clean.csv -o demo/items.csv
-gdpb aggregate demo/items.csv --population 260000000 -o demo/aggregate.csv
+git clone https://github.com/kazinniksoph/gdpb
+cd gdpb
+pip install -e ".[dev]"
+pytest
 ```
 
-Or drive the whole thing from one file:
+Requires Python 3.10 or later. Dependencies include `numpy`, `pandas`, `statsmodels`, `scikit-learn`, and `pyyaml`.
+
+## Quick start
+
+Run the pipeline on synthetic survey data with known WTA values and adoption rates:
+
+```bash
+# Generate synthetic survey responses
+gdpb simulate demo --n-per-item 2100
+
+# Clean responses
+gdpb clean demo/raw_responses.csv -o demo/clean.csv
+
+# Estimate WTA for each product
+gdpb estimate demo/clean.csv -o demo/items.csv
+
+# Calculate aggregate consumer surplus
+gdpb aggregate demo/items.csv \
+  --population 260000000 \
+  -o demo/aggregate.csv
+```
+
+Alternatively, run the entire pipeline from a single configuration file:
 
 ```yaml
 # config.yaml
 responses: raw_responses.csv
 items: items.csv
-cleaning:    { min_duration_seconds: 45, require_attention: true }
-estimation:  { link: logit, n_boot: 500, seed: 0 }
-aggregation: { population: 260000000, adoption: adoption.csv }   # adoption.csv optional
+
+cleaning:
+  min_duration_seconds: 45
+  require_attention: true
+
+estimation:
+  link: logit
+  n_boot: 500
+  seed: 0
+
+aggregation:
+  population: 260000000
+  adoption: adoption.csv  # Optional external adoption data
+
 output: deposit
 ```
+
+Run:
 
 ```bash
 gdpb run config.yaml
 ```
 
-The deposit folder holds `items.csv`, `aggregate.csv`, `metadata.json`,
-`audit.json` and a readable `summary.md`.
+The resulting `deposit/` directory contains:
 
-## The two files everything shares
+- `items.csv`: Product-level WTA estimates
+- `aggregate.csv`: Aggregate consumer surplus
+- `metadata.json`: Estimation settings and survey metadata
+- `audit.json`: Cleaning rules and excluded observations
+- `summary.md`: Readable summary of the results
 
-**Responses** (long, one row per respondent × item):
+These files provide a standardized record that other researchers can reproduce and compare across countries and survey waves.
 
-| column | meaning |
+## Input data
+
+The package uses two files.
+
+### 1. Responses
+
+The response file is in long format, with **one row per respondent and product**.
+
+| Column | Description |
 |---|---|
-| `respondent_id` | stable id |
-| `item` | key matching the item file |
-| `price` | the one randomized monthly payment the respondent saw |
-| `response` | `yes` (would give it up for the payment), `no`, or `dont_use` |
-| optional | `duration_seconds`, `attention_check_passed`, `selected_fake_item`, `weight`, demographics |
+| `respondent_id` | Unique respondent identifier |
+| `item` | Product identifier matching the items file |
+| `price` | Randomly assigned monthly compensation offer |
+| `response` | `yes` (accepts compensation), `no` (rejects), or `dont_use` |
+| Optional | `duration_seconds`, `attention_check_passed`, `selected_fake_item`, `weight`, demographics |
 
-Common export codings (Yes/No strings, 1/0) are mapped automatically by `gdpb validate`.
+Common survey response formats, including Yes/No strings and 1/0 coding, are standardized by `gdpb validate`.
 
-**Items** (one row per item):
+### 2. Items
 
-| column | meaning |
+The items file defines the products and their survey design.
+
+| Column | Description |
 |---|---|
-| `item` | key |
-| `label` | wording shown to respondents |
-| `scope` | `brand` or `category`; never sum surplus across the two |
-| `grid` | pipe-separated prices, e.g. `1|10|20|50|100|200|500` |
+| `item` | Product identifier |
+| `label` | Wording shown to respondents |
+| `scope` | `brand` or `category`; overlapping valuations should not be added |
+| `grid` | Payment amounts separated by pipes, e.g. `1\|10\|20\|50\|100\|200\|500` |
 
-Platform exporters (Qualtrics and others) will read the item file and write a
-survey; until then, the item file plus `gdpb design` give you the per-respondent
-allocation to load into any survey tool.
+The package is independent of the survey platform. Researchers can use `gdpb design` to generate price grids and respondent allocations, then import these into their preferred survey tool.
 
-## What the estimator does
+Automated exporters for Qualtrics and other platforms are planned.
 
-For each item, among users only:
+## WTA estimation
 
-1. Fit `Pr(accept) = F(α + β ln price)` with a logit (default) or probit link.
-2. Median WTA = `exp(−α/β)`, with a percentile bootstrap CI over respondents.
-3. Mean WTA = area under the fitted survival curve, truncated at the top of the grid.
-   This is a lower bound and is the figure used for aggregate surplus.
-4. Isotonic (monotone) acceptance curve and its median crossing as a
-   nonparametric check, plus a Kaplan–Meier style survival curve.
-5. Flags: median outside the grid (left/right censored), acceptance too high at
-   the lowest price or too low at the highest (grid misplaced).
+For each product, the package estimates WTA among respondents who use it.
 
-`P(use)` comes from the `dont_use` option, or from an external adoption file
-when you have a representative source. Aggregate annual surplus is
-`P(use) × mean WTA × population × 12`. The total-income route to GDP-B growth
-(eq. 33 of the paper) is in `gdpb.aggregate.total_income_growth`.
+1. **Acceptance model.** Fit a logit (default) or probit model relating acceptance to log payment:
+
+   `Pr(accept = 1 | price) = F(α + β ln(price))`
+
+2. **Median WTA.** Calculate the payment at which predicted acceptance reaches 50%:
+
+   `Median WTA = exp(−α/β)`
+
+   Confidence intervals are obtained using a respondent-level percentile bootstrap.
+
+3. **Mean WTA.** Integrate the fitted survival curve up to the highest offered price. This truncated mean is a lower-bound estimate of unrestricted mean WTA and is used to calculate aggregate consumer surplus.
+
+4. **Nonparametric checks.** Estimate an isotonic acceptance curve, which enforces monotonicity, and identify its 50% crossing. The package also produces a Kaplan–Meier-style WTA survival curve.
+
+5. **Identification and grid diagnostics.** Flag estimates whose medians fall outside the offered price range, including cases where acceptance at the lowest price is already above 50% or acceptance at the highest price remains below 50%. These diagnostics help determine whether subsequent survey waves need different price grids.
+
+### Aggregating consumer surplus
+
+The share of the population using each product, `P(use)`, can be estimated from the `dont_use` responses or supplied through an external, representative adoption dataset.
+
+Annual consumer surplus is calculated as:
+
+**Annual CS = P(use) × Mean monthly WTA among users × Population × 12**
+
+The package also implements the total-income approach to GDP-B growth (equation 33 of the paper):
+
+`gdpb.aggregate.total_income_growth`
 
 ## Python API
 
+The main functions can also be called directly from Python:
+
 ```python
 import pandas as pd
-from gdpb import validate_responses, clean_responses, estimate_all_items
+from gdpb import (
+    validate_responses,
+    clean_responses,
+    estimate_all_items,
+)
 
-raw = validate_responses(pd.read_csv("raw_responses.csv"))
+# Validate and standardize survey responses
+raw = validate_responses(
+    pd.read_csv("raw_responses.csv")
+)
+
+# Apply cleaning rules and retain an audit
 clean, audit = clean_responses(raw)
-table, fits = estimate_all_items(clean, link="probit", n_boot=1000)
+
+# Estimate item-level WTA
+table, fits = estimate_all_items(
+    clean,
+    link="probit",
+    n_boot=1000,
+)
 ```
 
-## Design helpers
+This returns item-level estimates and fitted models, allowing researchers to inspect results or extend the analysis.
+
+## Survey design tools
+
+The package includes functions for constructing price grids, updating them between waves, and determining sample sizes.
 
 ```python
-from gdpb import log_grid, recenter_grid, required_sample, allocate
-log_grid(center=50, n=7, span=2.5)          # first-wave grid around a pilot median
-recenter_grid(table.iloc[0])                # second-wave grid from a first-wave fit
-required_sample(n_prices=7, per_price=200, p_use=0.6, attrition=0.1)
+from gdpb import (
+    log_grid,
+    recenter_grid,
+    required_sample,
+    allocate,
+)
+
+# First-wave price grid centered on a pilot median
+log_grid(center=50, n=7, span=2.5)
+
+# Re-center the grid using a first-wave estimate
+recenter_grid(table.iloc[0])
+
+# Calculate required sample size
+required_sample(
+    n_prices=7,
+    per_price=200,
+    p_use=0.6,
+    attrition=0.1,
+)
 ```
+
+These tools help ensure that randomized payment offers adequately cover the WTA distribution and that each price point receives sufficient observations.
 
 ## Validation
 
-Tests recover the medians and usage rates of a synthetic survey with known
-ground truth (`pytest`). `scripts/validate_genai.py` reproduces the published
-medians of the generative-AI survey from the raw microdata when that data is
-available locally; the data itself is not in this repository.
+The package is tested using synthetic survey data with known WTA distributions and adoption rates. The tests (`pytest`) verify that the estimation pipeline recovers these underlying values.
+
+An additional script, `scripts/validate_genai.py`, reproduces the published median WTA estimates from the generative AI survey when the original microdata are available locally.
+
+The survey microdata are **not included** in the public repository.
 
 ## Roadmap
 
-- Survey exporters: Qualtrics (REST) from the Wave 1/2 builders, plus a generic CSV/QSF export
-- Interval-censored parametric fits (Weibull, log-logistic AFT) for sparse multi-item designs
-- Post-stratification weights from census margins
-- Documentation site from the executable protocol chapters
+Planned extensions include:
+
+- **Survey exporters:** Qualtrics REST integration based on the Wave 1/2 survey builders, plus generic CSV and QSF export.
+- **Sparse-data estimation:** Interval-censored parametric models, including Weibull and log-logistic accelerated failure time (AFT) models.
+- **Population weighting:** Post-stratification weights based on census margins.
+- **Documentation:** A dedicated documentation site built from the executable methodology and protocol.
 
 ## License
 
